@@ -1,7 +1,7 @@
 const express = require("express");
 const fs = require("fs");
 const { exec } = require("child_process");
-let router = express.Router();
+const router = express.Router();
 const pino = require("pino");
 const {
   default: makeWASocket,
@@ -20,111 +20,150 @@ function removeFile(FilePath) {
 
 router.get("/", async (req, res) => {
   let num = req.query.number;
-  async function RobinPair() {
-    const { state, saveCreds } = await useMultiFileAuthState(`./session`);
+
+  async function XubiPair() {
+    const { state, saveCreds } = await useMultiFileAuthState("./session");
+
     try {
-      let RobinPairWeb = makeWASocket({
+      const sock = makeWASocket({
         auth: {
           creds: state.creds,
           keys: makeCacheableSignalKeyStore(
             state.keys,
-            pino({ level: "fatal" }).child({ level: "fatal" })
+            pino({ level: "silent" })
           ),
         },
         printQRInTerminal: false,
-        logger: pino({ level: "fatal" }).child({ level: "fatal" }),
-        browser: Browsers.macOS("Safari"),
+        logger: pino({ level: "silent" }),
+        browser: Browsers.macOS("Chrome"),
+        syncFullHistory: false,
+        markOnlineOnConnect: false,
       });
 
-      if (!RobinPairWeb.authState.creds.registered) {
+      // Pairing code request
+      if (!sock.authState.creds.registered) {
         await delay(1500);
         num = num.replace(/[^0-9]/g, "");
-        const code = await RobinPairWeb.requestPairingCode(num);
+        const code = await sock.requestPairingCode(num);
+        console.log("Pairing Code generated for:", num);
+
         if (!res.headersSent) {
-          await res.send({ code });
+          res.send({ code });
         }
       }
 
-      RobinPairWeb.ev.on("creds.update", saveCreds);
-      RobinPairWeb.ev.on("connection.update", async (s) => {
-        const { connection, lastDisconnect } = s;
+      sock.ev.on("creds.update", saveCreds);
+
+      sock.ev.on("connection.update", async (update) => {
+        const { connection, lastDisconnect } = update;
+
         if (connection === "open") {
+          console.log("✅ Connection opened successfully");
+
           try {
-            await delay(10000);
-            const sessionPrabath = fs.readFileSync("./session/creds.json");
+            await delay(8000); // Wait for full sync
 
-            const auth_path = "./session/";
-            const user_jid = jidNormalizedUser(RobinPairWeb.user.id);
+            const userJid = jidNormalizedUser(sock.user.id);
+            console.log("📱 Sending to:", userJid);
 
-            function randomMegaId(length = 6, numberLength = 4) {
-              const characters =
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-              let result = "";
-              for (let i = 0; i < length; i++) {
-                result += characters.charAt(
-                  Math.floor(Math.random() * characters.length)
-                );
-              }
-              const number = Math.floor(
-                Math.random() * Math.pow(10, numberLength)
+            // ========== Upload to Mega ==========
+            let sessionId = "";
+
+            try {
+              const randomName = () => {
+                const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                let str = "";
+                for (let i = 0; i < 8; i++) {
+                  str += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return str + Date.now().toString().slice(-4) + ".json";
+              };
+
+              console.log("⬆️ Uploading session to Mega...");
+              const megaUrl = await upload(
+                fs.createReadStream("./session/creds.json"),
+                randomName()
               );
-              return `${result}${number}`;
+
+              sessionId = megaUrl.replace("https://mega.nz/file/", "");
+              console.log("✅ Mega Upload Success");
+            } catch (err) {
+              console.log("❌ Mega Upload Failed:", err.message || err);
+              sessionId = "MEGA_FAILED_PLEASE_CHECK_LOGS";
             }
 
-            const mega_url = await upload(
-              fs.createReadStream(auth_path + "creds.json"),
-              `${randomMegaId()}.json`
-            );
+            // ========== Send Messages ==========
+            const caption = `*XUBI-MD WhatsApp Bot*
 
-            const string_session = mega_url.replace(
-              "https://mega.nz/file/",
-              ""
-            );
+✅ *Session Generated Successfully!*
 
-            const sid = `*ROBIN [The powerful WA BOT]*\n\n👉 ${string_session} 👈\n\n*This is the your Session ID, copy this id and paste into config.js file*\n\n*You can ask any question using this link*\n\n*wa.me/message/WKGLBR2PCETWD1*\n\n*You can join my whatsapp group*\n\n*https://chat.whatsapp.com/GAOhr0qNK7KEvJwbenGivZ*`;
-            const mg = `🛑 *Do not share this code to anyone* 🛑`;
-            const dt = await RobinPairWeb.sendMessage(user_jid, {
-              image: {
-                url: "https://raw.githubusercontent.com/Dark-Robin/Bot-Helper/refs/heads/main/autoimage/Bot%20robin%20WP.jpg",
-              },
-              caption: sid,
+👉 *Session ID:*
+\`\`\`${sessionId}\`\`\`
+
+📋 *How to use:*
+1. Copy the Session ID above
+2. Paste it into your config.js / settings.js
+3. Restart the bot
+
+⚠️ *Do not share this Session ID with anyone!*
+
+*Powered by Xubi-md*`;
+
+            // Send main message
+            await sock.sendMessage(userJid, { text: caption });
+            await delay(1200);
+
+            // Send session only (easy to copy)
+            await sock.sendMessage(userJid, { text: sessionId });
+            await delay(800);
+
+            // Warning
+            await sock.sendMessage(userJid, {
+              text: "🛑 *Do not share this code with anyone*",
             });
-            const msg = await RobinPairWeb.sendMessage(user_jid, {
-              text: string_session,
-            });
-            const msg1 = await RobinPairWeb.sendMessage(user_jid, { text: mg });
-          } catch (e) {
-            exec("pm2 restart prabath");
+
+            console.log("✅ All messages sent successfully!");
+
+          } catch (err) {
+            console.log("===== ERROR WHILE SENDING =====");
+            console.log(err);
           }
 
-          await delay(100);
-          return await removeFile("./session");
+          // Cleanup
+          await delay(4000);
+          removeFile("./session");
+          console.log("Session folder cleaned. Exiting...");
           process.exit(0);
-        } else if (
+        }
+
+        // Reconnect if closed unexpectedly
+        if (
           connection === "close" &&
-          lastDisconnect &&
-          lastDisconnect.error &&
-          lastDisconnect.error.output.statusCode !== 401
+          lastDisconnect?.error?.output?.statusCode !== 401
         ) {
-          await delay(10000);
-          RobinPair();
+          console.log("Connection closed. Reconnecting in 8s...");
+          await delay(8000);
+          XubiPair();
         }
       });
     } catch (err) {
-      exec("pm2 restart Robin-md");
-      console.log("service restarted");
-      RobinPair();
-      await removeFile("./session");
+      console.log("===== OUTER ERROR =====");
+      console.log(err);
+
+      exec("pm2 restart Robin");
+      removeFile("./session");
+
       if (!res.headersSent) {
-        await res.send({ code: "Service Unavailable" });
+        res.send({ code: "Service Unavailable" });
       }
     }
   }
-  return await RobinPair();
+
+  await XubiPair();
 });
 
-process.on("uncaughtException", function (err) {
-  console.log("Caught exception: " + err);
+process.on("uncaughtException", (err) => {
+  console.log("Uncaught Exception:", err);
   exec("pm2 restart Robin");
 });
 
